@@ -41,7 +41,7 @@ class SpotifyEpisode(Episode):
     songs: Dict[str, str]
 
 
-@dataclass()
+@dataclass
 class Drs3Episode(Episode):
     download_url: str
 
@@ -51,7 +51,7 @@ def extract_episodes_from_raw_songs(raw_songs: Dict[str, str]) -> List[SpotifyEp
     current_episode_title = ""
     current_episode: Optional[SpotifyEpisode] = None
 
-    for raw_song_title, raw_song_artists in raw_songs.values():
+    for raw_song_title, raw_song_artists in raw_songs.items():
         if ':' not in raw_song_title:
             # some episodes are not split into multiple tracks/scenes
             episode_title = raw_song_title
@@ -60,9 +60,13 @@ def extract_episodes_from_raw_songs(raw_songs: Dict[str, str]) -> List[SpotifyEp
         if episode_title != current_episode_title:
             if current_episode:
                 episodes.append(current_episode)
-            current_episode = SpotifyEpisode(episode_title, {})
+            current_episode = SpotifyEpisode(episode_title, songs={})
+            current_episode_title = current_episode.title
 
         current_episode.songs[raw_song_title] = raw_song_artists
+
+    if current_episode and current_episode not in episodes:
+        episodes.append(current_episode)
 
     return episodes
 
@@ -120,7 +124,7 @@ def download_episode_from_yt(episode: SpotifyEpisode):
         final_audio_file = segments[0]
         for segment in segments[1:]:
             final_audio_file += segment
-        final_audio_file.export(DATA_DIR_PATH / f"{episode.title}.mp3", format="mp3",
+        final_audio_file.export(episode.final_path, format="mp3",
                                 tags={"title": episode.title, "artist": "Philip Maloney"})
 
         # delete scenes
@@ -132,7 +136,7 @@ def download_episode_from_yt(episode: SpotifyEpisode):
 
 def download_episode_from_drs3(episode: Drs3Episode) -> bool:
     ydl_opts = {
-        'outtmpl': episode.temp_path,
+        'outtmpl': str(episode.temp_path),
         'postprocessor_args': ['-metadata', 'title=' + episode.title,
                                '-metadata', 'artist=Philip Maloney']
     }
@@ -166,7 +170,7 @@ def is_episode_known_as_duplicate(episode: Episode) -> Optional[str]:
         return None
 
     duplicates: Dict[str, str] = json.loads(DUPLICATE_LIST_FILE.read_text())
-    return duplicates.get(episode.title, default=None)
+    return duplicates.get(episode.title, None)
 
 
 def register_duplicate(duplicate_name: str, episode_name: str) -> None:

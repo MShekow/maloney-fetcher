@@ -38,22 +38,26 @@ def download_old_episodes_from_spotify_and_yt():
 def get_drs3_episode_list() -> List[Drs3Episode]:
     episodes = []
     url = "https://www.srf.ch/play/radio/show/93a35193-66b6-4426-b7c1-9658cc497124/latestEpisodes?maxDate=ALL"
-    for i in range(200):
+    for i in range(50):
         response = requests.get(url)
         json_data: dict = response.json()
 
-        episodes = json_data.get("episodes", default=None)
-        if not episodes:
+        current_page_episodes = json_data.get("episodes", None)
+        if not current_page_episodes:
             break
 
-        for episode in episodes:
+        for episode in current_page_episodes:
             title = episode["title"]
             download_url = episode["absoluteDetailUrl"]
             episodes.append(Drs3Episode(title, download_url))
 
-        next_page_url = json_data.get("nextPageUrl", default="")
+        next_page_url = json_data.get("nextPageUrl", "")
         if not next_page_url:
             break
+
+        if next_page_url.startswith('/'):
+            next_page_url = "https://www.srf.ch" + next_page_url
+
         url = next_page_url
 
     return episodes
