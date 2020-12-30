@@ -87,6 +87,7 @@ def download_episode_from_yt(episode: SpotifyEpisode):
             'outtmpl': outtmpl,
             'default_search': 'ytsearch',
             'noplaylist': True,
+            'quiet': True,
             'postprocessor_args': ['-metadata', 'title=' + song,
                                    '-metadata', 'artist=' + artist]
         }
@@ -138,6 +139,7 @@ def download_episode_from_yt(episode: SpotifyEpisode):
 def download_episode_from_drs3(episode: Drs3Episode) -> bool:
     ydl_opts = {
         'outtmpl': str(episode.temp_path),
+        'quiet': True,
         'postprocessor_args': ['-metadata', 'title=' + episode.title,
                                '-metadata', 'artist=Philip Maloney']
     }

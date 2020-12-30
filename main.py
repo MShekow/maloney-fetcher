@@ -1,4 +1,7 @@
 import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 from typing import List
 
 import requests
@@ -11,8 +14,8 @@ from utils import extract_episodes_from_raw_songs, is_episode_already_downloaded
     Drs3Episode, download_episode_from_drs3, is_episode_known_as_duplicate, is_episode_already_known_as_duplicate, \
     register_duplicate, add_to_fingerprint_db, build_fingerprints_and_check_for_duplicates
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOGGER = logging.getLogger("MaloneyDownloader")
+LOGGER.level = logging.DEBUG
 
 
 def download_old_episodes_from_spotify_and_yt():
@@ -28,7 +31,8 @@ def download_old_episodes_from_spotify_and_yt():
     episodes = extract_episodes_from_raw_songs(raw_songs=songs)
     LOGGER.info(f"Fetched {len(songs)} individual tracks that make up {len(episodes)} episodes")
 
-    for episode in episodes:
+    for index, episode in enumerate(episodes):
+        LOGGER.debug(f"Downloading episode {index + 1}/{len(episodes)}: {episode.title}")
         if is_episode_already_downloaded(episode):
             LOGGER.debug(f"Skipping download of episode '{episode.title}' because it is already downloaded")
             continue
