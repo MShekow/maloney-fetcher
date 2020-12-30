@@ -1,17 +1,21 @@
+import json
 import logging
 import os
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 import youtube_dl
 from pydub import AudioSegment
 
 DATA_DIR_PATH = Path("/data")
 DATA_DIR_TEMP_PATH = DATA_DIR_PATH / "temp"
+DUPLICATE_LIST_FILE = DATA_DIR_PATH / "duplicates.csv"
 
 Y_DL_FORMAT_STRING = "bestaudio/best"
+MAX_Y_DL_RETRIALS = 3
 
 LOGGER = logging.getLogger("MaloneyDownloader")
 
@@ -27,6 +31,9 @@ class Episode:
     @property
     def temp_path(self) -> Path:
         return DATA_DIR_TEMP_PATH / f"{self.title}.mp3"
+
+    def move_from_temp_to_final(self):
+        os.rename(src=self.temp_path, dst=self.final_path)
 
 
 @dataclass
@@ -63,9 +70,11 @@ def extract_episodes_from_raw_songs(raw_songs: Dict[str, str]) -> List[SpotifyEp
 def download_episode_from_yt(episode: SpotifyEpisode):
     """
     Downloads all (parts / "scenes") of the episodes, merges them (if necessary) and stores them in the data directory.
-    Retries the download in case a connection error occurred
+    Retries the download in case a connection error occurred.
     """
+    episode_download_successful = True
     for song, artist in episode.songs.items():
+        # Building the ydl_opts dict was taken from the spotify-dl code, see spotify_dl/youtube.py file
         query = f"{artist} - {song}".replace(":", "").replace("\"", "")
         outtmpl = str(DATA_DIR_TEMP_PATH / f"{song}.%(ext)s")
         ydl_opts = {
@@ -83,53 +92,94 @@ def download_episode_from_yt(episode: SpotifyEpisode):
         }
         ydl_opts['postprocessors'] = [mp3_postprocess_opts.copy()]
 
-        # TODO: retrial logic
+        song_download_successful = False
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            try:
-                ydl.download([query])
-            except Exception as e:
-                # log.debug(e)
-                # TODO use logger, clean up previously loaded scenes if they exist
-                print('Failed to download: {}, please ensure YouTubeDL is up-to-date. '.format(query))
-                continue
+            for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
+                try:
+                    ydl.download([query])
+                    song_download_successful = True
+                    break
+                except Exception as e:
+                    LOGGER.warning(f"YouTube download attempt #{attempt} for episode '{episode.title}' and "
+                                   f"song '{song}' failed: {e}")
+                    if attempt == MAX_Y_DL_RETRIALS:
+                        LOGGER.warning("Giving up!")
+                        continue
+        if not song_download_successful:
+            episode_download_successful = False
 
-        # merge scene files if necessary and move to final location
-        if len(episode.songs) > 1:
-            segments = []
-            for song in episode.songs:
-                segment = AudioSegment.from_mp3(str(DATA_DIR_TEMP_PATH / f"{song}.mp3"))
-                segments.append(segment)
-            final_audio_file = segments[0]
-            for segment in segments[1:]:
-                final_audio_file += segment
-            final_audio_file.export(DATA_DIR_PATH / f"{episode.title}.mp3", format="mp3",
-                                    tags={"title": episode.title, "artist": "Philip Maloney"})
+    if not episode_download_successful:
+        return
 
-            # delete scenes
-            for song in episode.songs:
-                os.remove(DATA_DIR_TEMP_PATH / f"{song}.mp3")
-        else:
-            os.rename(src=episode.temp_path, dst=episode.final_path)
+    # merge scene files if necessary and move to final location
+    if len(episode.songs) > 1:
+        segments = []
+        for song in episode.songs:
+            segment = AudioSegment.from_mp3(str(DATA_DIR_TEMP_PATH / f"{song}.mp3"))
+            segments.append(segment)
+        final_audio_file = segments[0]
+        for segment in segments[1:]:
+            final_audio_file += segment
+        final_audio_file.export(DATA_DIR_PATH / f"{episode.title}.mp3", format="mp3",
+                                tags={"title": episode.title, "artist": "Philip Maloney"})
+
+        # delete scenes
+        for song in episode.songs:
+            os.remove(DATA_DIR_TEMP_PATH / f"{song}.mp3")
+    else:
+        episode.move_from_temp_to_final()
 
 
-def download_episode_from_drs3(episode: Drs3Episode):
+def download_episode_from_drs3(episode: Drs3Episode) -> bool:
     ydl_opts = {
         'outtmpl': episode.temp_path,
         'postprocessor_args': ['-metadata', 'title=' + episode.title,
                                '-metadata', 'artist=Philip Maloney']
     }
 
-    # TODO: retrial logic
+    download_successful = False
     with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-        try:
-            ydl.download([episode.download_url])
-        except Exception as e:
-            pass
-            # TODO use logger, clean up previously loaded scenes if they exist
+        for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
+            try:
+                ydl.download([episode.download_url])
+                download_successful = True
+                break
+            except Exception as e:
+                LOGGER.warning(f"DRS3-download attempt #{attempt} of episode '{episode.title}' failed: {e}")
+                if attempt == MAX_Y_DL_RETRIALS:
+                    LOGGER.warning("Giving up!")
+
+    if download_successful:
+        assert episode.temp_path.is_file(), f"Episode '{episode.title}' was downloaded with Y-DL from DRS3, but " \
+                                            f"the file is missing!"
+        return True
+
+    return False
 
 
 def is_episode_already_downloaded(episode: Episode) -> bool:
     return episode.final_path.is_file()
+
+
+def is_episode_known_as_duplicate(episode: Episode) -> Optional[str]:
+    if not DUPLICATE_LIST_FILE.is_file():
+        return None
+
+    duplicates: Dict[str, str] = json.loads(DUPLICATE_LIST_FILE.read_text())
+    return duplicates.get(episode.title, default=None)
+
+
+def register_duplicate(duplicate_name: str, episode_name: str) -> None:
+    duplicates: Dict[str, str]
+    if not DUPLICATE_LIST_FILE.is_file():
+        duplicates = {}
+    else:
+        duplicates = json.loads(DUPLICATE_LIST_FILE.read_text())
+
+    duplicates[duplicate_name] = episode_name
+
+    with DUPLICATE_LIST_FILE.open(mode="wt") as f:
+        json.dump(duplicates, f)
 
 
 def build_fingerprints_and_check_for_duplicates():
@@ -140,28 +190,65 @@ def build_fingerprints_and_check_for_duplicates():
     except subprocess.CalledProcessError:
         LOGGER.exception("Checking for duplicates failed")
 
+
 def is_fingerprint_already_known_as(episode: Episode) -> Optional[str]:
-    # TODO build 3 clips each 10 seconds long, scan them, then delete them
     complete_segment = AudioSegment.from_mp3(episode.temp_path)
-    CLIP_LENGTH_SECS = 10
-    for i in range(3):
-        base_start = i * (complete_segment.duration_seconds / 3)
-        start_sec = base_start + (complete_segment.duration_seconds / 6) - (CLIP_LENGTH_SECS / 2)
-        end_sec = base_start + (complete_segment.duration_seconds / 6) + (CLIP_LENGTH_SECS / 2)
-    output = subprocess.check_output(["olaf", "query", "snippet"])
+    # After 30 seconds the introduction music has finished
+    QUERY_CLIP_LENGTH_SECONDS = 60
+    query_segment = complete_segment[30:30 + QUERY_CLIP_LENGTH_SECONDS]
+    query_clip_path = DATA_DIR_TEMP_PATH / "query_clip.mp3"
+    query_segment.export(query_clip_path, format="mp3")
+
+    # As per https://github.com/JorenSix/Olaf the "monitor" command takes the query clip, splits it into smaller clips
+    # of 5 seconds, and queries them
+    output = subprocess.check_output(["olaf", "monitor", str(query_clip_path)])
+    output_text = output.decode("utf-8")
 
     """
-    Match response:
+    The output of "olaf monitor <path>" is something like this:
     query index,total queries, query name, match name, match id, match count (#), q to ref time delta (s), ref start (s), ref stop (s), query time (s)
     1, 1, extract.mp3, Auf der Flucht.mp3, 4147541459, 63, -199.68, 199.90, 208.32, 8.64
+    1, 1, extract.mp3, NO_MATCH, 0, 0, 0.00, 0.00, 0.00, 0.00
+    <many more lines similar to the above ones>
     Proccessed 374 fp's from 10.1s in 0.018s (572 times realtime) 
-
-
-    olTODO no-match response
-    query index,total queries, query name, match name, match id, match count (#), q to ref time delta (s), ref start (s), ref stop (s), query time (s)
-    1, 1, extract2.mp3, NO_MATCH, 0, 0, 0.00, 0.00, 0.00, 0.00
-    Proccessed 607 fp's from 14.8s in 0.020s (741 times realtime)
     
-    Or we could simply create a 1 minute clip starting at 00:30 and use olaf monitor - it should be full of NO_MATCH outputs
-    Just build a majority
+    We do not need the first and last line, as they contain no meaningful data.
+    We only care about the "match name" column (3rd column, 0-indexed)
+    
+    The general idea of identifying a duplicate is that we determine the majority of identified matches and return it.
     """
+
+    sample_count = len(output_text.splitlines()) - 2
+    assert sample_count > 8, f"'olaf monitor' command produced only produced {sample_count} sample(s)!"
+
+    matched_episodes = []
+    for line in output_text.splitlines(keepends=False)[1:-1]:
+        matched_episode = line.split(", ")[3]
+        # Olaf's DB contains the file names (including extension), which we don't care about here
+        matched_episode = matched_episode.rstrip(".mp3")
+        matched_episodes.append(matched_episode)
+
+    counter = Counter(matched_episodes)
+    most_common_episode = counter.most_common(1)[0]
+    most_common_episode_name, most_common_episode_count = most_common_episode
+
+    found_clear_winner = (most_common_episode_count / sample_count) > 0.7
+
+    if found_clear_winner:
+        return_val = None if most_common_episode_name == "NO_MATCH" else most_common_episode_name
+    else:
+        LOGGER.debug(f"Unable to clearly identify duplicate for episode '{episode.title}'. Most common "
+                     f"matches: {counter.most_common(3)} - with a total of {sample_count} samples")
+        return_val = None
+
+    os.unlink(query_clip_path)
+
+    return return_val
+
+
+def add_to_fingerprint_db(episode: Episode):
+    assert episode.final_path.is_file(), f"Cannot add episode '{episode.title}' to fingerprint DB, file is missing!"
+    output = subprocess.check_output(["olaf", "store", str(episode.final_path)])
+    output_text = output.decode("utf-8")
+    lines = output_text.splitlines()
+    assert len(lines) == 1 and "times realtime" in lines[0], f"Unexpected output of Olaf store command: {output_text}"

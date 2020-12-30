@@ -1,7 +1,0 @@
-https://medium.com/slanglabs/how-to-build-python-transcriber-using-mozilla-deepspeech-5485b8d234cf
-describes how to setup deepspeech in code and CLI
-
-We can get the German model from https://gitlab.com/Jaco-Assistant/deepspeech-polyglot (at the bottom, GoogleDrive)
-
-Run:
-docker run -v D:/Daten/Maloney:/data -v D:/Daten/Maloney/fingerprintdb:/root/.olaf maloney-test
