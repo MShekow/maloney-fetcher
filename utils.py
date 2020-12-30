@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -199,12 +200,23 @@ def build_fingerprints_and_check_for_duplicates():
                            f"name '{potentially_existing_episode_name}'")
 
 
+def is_episode_already_fingerprinted(episode: Episode) -> bool:
+    with suppress(OSError):
+        with open("/root/.olaf/file_list.json", "r") as f:
+            scanned_files: Dict[int, str] = json.load(f)  # maps from internal ID to absolute path
+            return str(episode.final_path) in scanned_files.values()
+
+
 def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
+    if is_episode_already_fingerprinted(episode):
+        return episode.title
+
     episode_path = episode.temp_path if episode.temp_path.is_file() else episode.final_path
     complete_segment = AudioSegment.from_mp3(episode_path)
     # After 30 seconds the introduction music has finished
-    QUERY_CLIP_LENGTH_SECONDS = 60
-    query_segment = complete_segment[30:30 + QUERY_CLIP_LENGTH_SECONDS]
+    QUERY_CLIP_LENGTH_MS = 60000
+    THIRTY_SECS_MS = 30000
+    query_segment = complete_segment[THIRTY_SECS_MS:THIRTY_SECS_MS + QUERY_CLIP_LENGTH_MS]
     query_clip_path = DATA_DIR_TEMP_PATH / "query_clip.mp3"
     query_segment.export(query_clip_path, format="mp3")
 
@@ -219,7 +231,6 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     1, 1, extract.mp3, Auf der Flucht.mp3, 4147541459, 63, -199.68, 199.90, 208.32, 8.64
     1, 1, extract.mp3, NO_MATCH, 0, 0, 0.00, 0.00, 0.00, 0.00
     <many more lines similar to the above ones>
-    Proccessed 374 fp's from 10.1s in 0.018s (572 times realtime) 
     
     We do not need the first and last line, as they contain no meaningful data.
     We only care about the "match name" column (3rd column, 0-indexed)
@@ -227,14 +238,15 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     The general idea of identifying a duplicate is that we determine the majority of identified matches and return it.
     """
 
-    sample_count = len(output_text.splitlines()) - 2
-    if sample_count < 8:
+    sample_count = len(output_text.splitlines()) - 1  # discard the first line
+    if sample_count < 3:
         LOGGER.debug(f"'olaf monitor' command produced only produced {sample_count} sample(s) for "
                      f"episode '{episode.title}', skipping duplicate detection!")
+        os.unlink(query_clip_path)
         return None
 
     matched_episodes = []
-    for line in output_text.splitlines(keepends=False)[1:-1]:
+    for line in output_text.splitlines(keepends=False)[1:]:  # skip first line
         matched_episode = line.split(", ")[3]
         # Olaf's DB contains the file names (including extension), which we don't care about here
         matched_episode = matched_episode.rstrip(".mp3")
@@ -244,7 +256,7 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     most_common_episode = counter.most_common(1)[0]
     most_common_episode_name, most_common_episode_count = most_common_episode
 
-    found_clear_winner = (most_common_episode_count / sample_count) > 0.7
+    found_clear_winner = (most_common_episode_count / sample_count) > 0.6
 
     if found_clear_winner:
         return_val = None if most_common_episode_name == "NO_MATCH" else most_common_episode_name
@@ -263,4 +275,4 @@ def add_to_fingerprint_db(episode: Episode):
     output = subprocess.check_output(["olaf", "store", str(episode.final_path)])
     output_text = output.decode("utf-8")
     lines = output_text.splitlines()
-    assert len(lines) == 1 and "times realtime" in lines[0], f"Unexpected output of Olaf store command: {output_text}"
+    assert "times realtime" in lines[0], f"Unexpected output of Olaf store command: {output_text}"
