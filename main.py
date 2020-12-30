@@ -20,8 +20,8 @@ def download_old_episodes_from_spotify_and_yt():
         exit(1)
 
     sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials())
-    # url = "https://open.spotify.com/playlist/6U9szH2PXofr4xcbkJuteK"  # this is the real playlist!
-    url = "https://open.spotify.com/album/7iRfCugT5qF56Gq5eVur0U"
+    url = "https://open.spotify.com/playlist/6U9szH2PXofr4xcbkJuteK"  # this is the real playlist!
+    # url = "https://open.spotify.com/album/7iRfCugT5qF56Gq5eVur0U"  # use for testing (just 3 episodes)
     item_type, item_id = parse_spotify_url(url)
 
     songs = fetch_tracks(sp, item_type, url)
