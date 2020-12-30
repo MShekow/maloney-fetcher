@@ -187,16 +187,21 @@ def register_duplicate(duplicate_name: str, episode_name: str) -> None:
 
 
 def build_fingerprints_and_check_for_duplicates():
-    print("Checking for duplicates, this may take an hour or longer")
-    try:
-        with open("/data/deduplication-report.txt", "wt") as f:
-            subprocess.check_call(["olaf", "dedupm", "/data"], stdout=f, stderr=f)
-    except subprocess.CalledProcessError:
-        LOGGER.exception("Checking for duplicates failed")
+    LOGGER.info("Checking for duplicates, this may take an hour or longer")
+    for episode_file in DATA_DIR_PATH.glob("*.mp3"):
+        episode = Episode(title=episode_file.name.rstrip(".mp3"))
+        potentially_existing_episode_name = is_episode_already_known_as_duplicate(episode)
+        if not potentially_existing_episode_name:
+            add_to_fingerprint_db(episode)
+        elif potentially_existing_episode_name != episode.title:
+            register_duplicate(duplicate_name=episode.title, episode_name=potentially_existing_episode_name)
+            LOGGER.warning(f"YouTube-downloaded episode '{episode.title}' already exist under different "
+                           f"name '{potentially_existing_episode_name}'")
 
 
-def is_fingerprint_already_known_as(episode: Episode) -> Optional[str]:
-    complete_segment = AudioSegment.from_mp3(episode.temp_path)
+def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
+    episode_path = episode.temp_path if episode.temp_path.is_file() else episode.final_path
+    complete_segment = AudioSegment.from_mp3(episode_path)
     # After 30 seconds the introduction music has finished
     QUERY_CLIP_LENGTH_SECONDS = 60
     query_segment = complete_segment[30:30 + QUERY_CLIP_LENGTH_SECONDS]
@@ -223,7 +228,10 @@ def is_fingerprint_already_known_as(episode: Episode) -> Optional[str]:
     """
 
     sample_count = len(output_text.splitlines()) - 2
-    assert sample_count > 8, f"'olaf monitor' command produced only produced {sample_count} sample(s)!"
+    if sample_count < 8:
+        LOGGER.debug(f"'olaf monitor' command produced only produced {sample_count} sample(s) for "
+                     f"episode '{episode.title}', skipping duplicate detection!")
+        return None
 
     matched_episodes = []
     for line in output_text.splitlines(keepends=False)[1:-1]:

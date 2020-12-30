@@ -8,8 +8,8 @@ from spotify_dl.spotify import fetch_tracks, parse_spotify_url
 from spotipy.oauth2 import SpotifyClientCredentials
 
 from utils import extract_episodes_from_raw_songs, is_episode_already_downloaded, download_episode_from_yt, \
-    Drs3Episode, download_episode_from_drs3, is_episode_known_as_duplicate, is_fingerprint_already_known_as, \
-    register_duplicate, add_to_fingerprint_db
+    Drs3Episode, download_episode_from_drs3, is_episode_known_as_duplicate, is_episode_already_known_as_duplicate, \
+    register_duplicate, add_to_fingerprint_db, build_fingerprints_and_check_for_duplicates
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOGGER = logging.getLogger("MaloneyDownloader")
@@ -69,7 +69,10 @@ def download_new_radio_episodes() -> None:
     Checks duplicates using the episodes name (early reject) and after downloading (via audio fingerprinting),
     populating the fingerprint DB as more episodes are downloaded.
     """
-    for episode in get_drs3_episode_list():
+    episodes = get_drs3_episode_list()
+    for index, episode in enumerate(episodes):
+        LOGGER.info(f"Processing episode {index + 1}/{len(episodes)}: {episode.title}")
+
         if is_episode_already_downloaded(episode):
             LOGGER.info(f"Skipping DL of DRS episode '{episode.title}' because it is already downloaded")
             continue
@@ -88,7 +91,7 @@ def download_new_radio_episodes() -> None:
         if not success:
             continue
 
-        known_episode_name = is_fingerprint_already_known_as(episode)
+        known_episode_name = is_episode_already_known_as_duplicate(episode)
         if known_episode_name:
             LOGGER.warning(f"DRS3 episode '{episode.title}' already exist under different name '{known_episode_name}'")
             register_duplicate(duplicate_name=episode.title, episode_name=known_episode_name)
@@ -99,4 +102,5 @@ def download_new_radio_episodes() -> None:
 
 if __name__ == '__main__':
     download_old_episodes_from_spotify_and_yt()
+    build_fingerprints_and_check_for_duplicates()
     download_new_radio_episodes()
