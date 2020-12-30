@@ -11,5 +11,6 @@ WORKDIR /app
 COPY main.py .
 COPY utils.py .
 
-# CMD ["python", "main.py"]
-CMD ["bash"]
+CMD ["python", "main.py"]
+# Use this just for testing
+# CMD ["bash"]
