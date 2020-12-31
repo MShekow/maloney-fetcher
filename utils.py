@@ -5,25 +5,39 @@ import subprocess
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import youtube_dl
 from pydub import AudioSegment
 
+from youtube_playlists import YOUTUBE_PLAYLIST_IDS
+
 DATA_DIR_PATH = Path("/data")
 DATA_DIR_TEMP_PATH = DATA_DIR_PATH / "temp"
 DUPLICATE_LIST_FILE = DATA_DIR_PATH / "duplicates.csv"
 
-Y_DL_FORMAT_STRING = "bestaudio/best"
 MAX_Y_DL_RETRIALS = 3
+TWELVE_MINUTES = 12 * 60
+THIRTY_FIVE_MINUTES = 35 * 60
 
 LOGGER = logging.getLogger("MaloneyDownloader")
+
+
+class YouTubeDlHandler(logging.Handler):
+    def __init__(self, level=logging.NOTSET):
+        super().__init__(level)
+        self.messages = []
+
+    def emit(self, record: logging.LogRecord):
+        self.messages.append(record.getMessage())
 
 
 @dataclass
 class Episode:
     title: str
+    download_urls: List[str]
 
     @property
     def final_path(self) -> Path:
@@ -38,58 +52,133 @@ class Episode:
 
 
 @dataclass
-class SpotifyEpisode(Episode):
-    songs: Dict[str, str]
+class YouTubeEpisode(Episode):
+    duration_in_seconds: int
 
 
 @dataclass
-class Drs3Episode(Episode):
-    download_url: str
+class YouTubeVideo:
+    title: str
+    duration_in_seconds: int
+    video_id: str
 
 
-def extract_episodes_from_raw_songs(raw_songs: Dict[str, str]) -> List[SpotifyEpisode]:
-    episodes: List[SpotifyEpisode] = []
+def format_time(seconds: int) -> str:
+    def get_formatted_int(val: int):
+        return "%02d" % (val,)
+
+    seconds = timedelta(seconds=seconds)
+    d = datetime(1, 1, 1) + seconds
+
+    if d.day - 1 != 0:
+        return "%d days %s:%s:%s" % (
+            d.day - 1, get_formatted_int(d.hour), get_formatted_int(d.minute), get_formatted_int(d.second))
+    elif d.hour != 0:
+        return "%s:%s:%s hours" % (
+            get_formatted_int(d.hour), get_formatted_int(d.minute), get_formatted_int(d.second))
+    elif d.minute != 0:
+        return "%s:%s min" % (get_formatted_int(d.minute), get_formatted_int(d.second))
+    else:
+        return "%d sec" % d.second
+
+
+def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
+    LOGGER.info("Retrieving episode list of YouTube - this will take approx. 5 minutes")
+    videos = []
+
+    helper_logger = logging.getLogger("YouTube-DL Helper Logger")
+    helper_logger.level = logging.DEBUG
+    helper_logger.propagate = False
+
+    for playlist_id in YOUTUBE_PLAYLIST_IDS:
+        handler = YouTubeDlHandler()
+        helper_logger.handlers = [handler]
+
+        query = f"https://www.youtube.com/playlist?list={playlist_id}"
+        ydl_opts = {
+            'dump_single_json': True,
+            'extract_flat': True,
+            'logger': helper_logger,
+        }
+
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
+                try:
+                    ydl.download([query])
+                    ydl_log_output = handler.messages
+                    # Expect that the last line contains the single JSON dump that contains all information
+                    last_output_line = ydl_log_output[-1]
+                    assert last_output_line.startswith('{'), f"Last output line of Y-DL should be JSON, " \
+                                                             f"but is {ydl_log_output[-1]}"
+                    json_data = json.loads(last_output_line)
+                    entry: dict
+                    for entry in json_data["entries"]:
+                        videos.append(YouTubeVideo(title=entry["title"], duration_in_seconds=int(entry["duration"]),
+                                                   video_id=entry["id"]))
+                    break
+                except Exception as e:
+                    LOGGER.warning(f"Attempt #{attempt} failed to get videos in playlist: {e}")
+                    if attempt == MAX_Y_DL_RETRIALS:
+                        LOGGER.warning("Giving up!")
+                        continue
+
+    return videos
+
+
+def extract_episodes_from_youtube_videos(videos: List[YouTubeVideo]) -> List[YouTubeEpisode]:
+    episodes: List[YouTubeEpisode] = []
     current_episode_title = ""
-    current_episode: Optional[SpotifyEpisode] = None
+    current_episode: Optional[YouTubeEpisode] = None
 
-    for raw_song_title, raw_song_artists in raw_songs.items():
-        if ':' not in raw_song_title:
+    for video in videos:
+        if ':' not in video.title:
             # some episodes are not split into multiple tracks/scenes
-            episode_title = raw_song_title
+            episode_title = video.title
         else:
-            episode_title, _scene_index = raw_song_title.split(':')
+            episode_title, _scene_index = video.title.split(':')
         if episode_title != current_episode_title:
             if current_episode:
                 episodes.append(current_episode)
-            current_episode = SpotifyEpisode(episode_title, songs={})
+            current_episode = YouTubeEpisode(title=episode_title, download_urls=[], duration_in_seconds=0)
             current_episode_title = current_episode.title
 
-        current_episode.songs[raw_song_title] = raw_song_artists
+        current_episode.duration_in_seconds += video.duration_in_seconds
+        current_episode.download_urls.append(f"https://www.youtube.com/watch?v={video.video_id}")
 
     if current_episode and current_episode not in episodes:
         episodes.append(current_episode)
 
+    # Perform a sanity check on episode length
+    for episode in episodes:
+        if episode.duration_in_seconds < TWELVE_MINUTES or episode.duration_in_seconds > THIRTY_FIVE_MINUTES:
+            LOGGER.warning(f"Episode '{episode.title}' has an unplausible duration "
+                           f"of {format_time(episode.duration_in_seconds)}")
+
     return episodes
 
 
-def download_episode_from_yt(episode: SpotifyEpisode):
+def download_episode_from_yt(episode: YouTubeEpisode):
     """
     Downloads all (parts / "scenes") of the episodes, merges them (if necessary) and stores them in the data directory.
     Retries the download in case a connection error occurred.
     """
+    def get_temp_file_name_for_episode_part(download_url_index: int) -> str:
+        if len(episode.download_urls) == 1:
+            return episode.title
+        return f"{episode.title}_{download_url_index}"
+
     episode_download_successful = True
-    for song, artist in episode.songs.items():
+    for index, download_url in enumerate(episode.download_urls):
         # Building the ydl_opts dict was taken from the spotify-dl code, see spotify_dl/youtube.py file
-        query = f"{artist} - {song}".replace(":", "").replace("\"", "")
-        outtmpl = str(DATA_DIR_TEMP_PATH / f"{song}.%(ext)s")
+        outtmpl = str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.%(ext)s")
         ydl_opts = {
-            'format': Y_DL_FORMAT_STRING,
+            'format': "bestaudio/best",
             'outtmpl': outtmpl,
             'default_search': 'ytsearch',
             'noplaylist': True,
             'quiet': True,
-            'postprocessor_args': ['-metadata', 'title=' + song,
-                                   '-metadata', 'artist=' + artist]
+            'postprocessor_args': ['-metadata', 'title=' + episode.title,
+                                   '-metadata', 'artist=Philip Maloney']
         }
         mp3_postprocess_opts = {
             'key': 'FFmpegExtractAudio',
@@ -102,12 +191,15 @@ def download_episode_from_yt(episode: SpotifyEpisode):
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
                 try:
-                    ydl.download([query])
+                    ydl.download([download_url])
+                    # perform a sanity check, just in case - sometimes the DL fails silently for no good reason, no idea why
+                    assert episode.temp_path.is_file(), f"Download of index {index} for episode '{episode.title}' " \
+                                                        f"failed: MP3 file is missing!"
                     song_download_successful = True
                     break
                 except Exception as e:
                     LOGGER.warning(f"YouTube download attempt #{attempt} for episode '{episode.title}' and "
-                                   f"song '{song}' failed: {e}")
+                                   f"download URL '{download_url}' (index {index}) failed: {e}")
                     if attempt == MAX_Y_DL_RETRIALS:
                         LOGGER.warning("Giving up!")
                         continue
@@ -115,13 +207,14 @@ def download_episode_from_yt(episode: SpotifyEpisode):
             episode_download_successful = False
 
     if not episode_download_successful:
+        LOGGER.warning("Aborting the merging of the part files, because at least one part could not be downloaded")
         return
 
     # merge scene files if necessary and move to final location
-    if len(episode.songs) > 1:
+    if len(episode.download_urls) > 1:
         segments = []
-        for song in episode.songs:
-            segment = AudioSegment.from_mp3(str(DATA_DIR_TEMP_PATH / f"{song}.mp3"))
+        for index, download_url in enumerate(episode.download_urls):
+            segment = AudioSegment.from_mp3(str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"))
             segments.append(segment)
         final_audio_file = segments[0]
         for segment in segments[1:]:
@@ -130,13 +223,13 @@ def download_episode_from_yt(episode: SpotifyEpisode):
                                 tags={"title": episode.title, "artist": "Philip Maloney"})
 
         # delete scenes
-        for song in episode.songs:
-            os.remove(DATA_DIR_TEMP_PATH / f"{song}.mp3")
+        for index in range(len(episode.download_urls)):
+            os.remove(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3")
     else:
         episode.move_from_temp_to_final()
 
 
-def download_episode_from_drs3(episode: Drs3Episode) -> bool:
+def download_episode_from_drs3(episode: Episode) -> bool:
     ydl_opts = {
         'outtmpl': str(episode.temp_path),
         'quiet': True,
@@ -148,7 +241,7 @@ def download_episode_from_drs3(episode: Drs3Episode) -> bool:
     with youtube_dl.YoutubeDL(ydl_opts) as ydl:
         for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
             try:
-                ydl.download([episode.download_url])
+                ydl.download([episode.download_urls[0]])
                 download_successful = True
                 break
             except Exception as e:
@@ -192,7 +285,7 @@ def register_duplicate(duplicate_name: str, episode_name: str) -> None:
 def build_fingerprints_and_check_for_duplicates():
     LOGGER.info("Checking for duplicates, this may take an hour or longer")
     for episode_file in DATA_DIR_PATH.glob("*.mp3"):
-        episode = Episode(title=episode_file.name.rstrip(".mp3"))
+        episode = Episode(title=episode_file.name.rstrip(".mp3"), download_urls=[])
         potentially_existing_episode_name = is_episode_already_known_as_duplicate(episode)
         if not potentially_existing_episode_name:
             add_to_fingerprint_db(episode)
@@ -234,7 +327,7 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     1, 1, extract.mp3, NO_MATCH, 0, 0, 0.00, 0.00, 0.00, 0.00
     <many more lines similar to the above ones>
     
-    We do not need the first and last line, as they contain no meaningful data.
+    We do not need the first line, as it contains no meaningful data.
     We only care about the "match name" column (3rd column, 0-indexed)
     
     The general idea of identifying a duplicate is that we determine the majority of identified matches and return it.

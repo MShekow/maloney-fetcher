@@ -5,41 +5,33 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 from typing import List
 
 import requests
-import spotipy
-from spotify_dl.scaffold import check_for_tokens
-from spotify_dl.spotify import fetch_tracks, parse_spotify_url
-from spotipy.oauth2 import SpotifyClientCredentials
 
-from utils import extract_episodes_from_raw_songs, is_episode_already_downloaded, download_episode_from_yt, \
-    Drs3Episode, download_episode_from_drs3, is_episode_known_as_duplicate, is_episode_already_known_as_duplicate, \
-    register_duplicate, add_to_fingerprint_db, build_fingerprints_and_check_for_duplicates
+from utils import extract_episodes_from_youtube_videos, is_episode_already_downloaded, download_episode_from_yt, \
+    download_episode_from_drs3, is_episode_known_as_duplicate, is_episode_already_known_as_duplicate, \
+    register_duplicate, add_to_fingerprint_db, build_fingerprints_and_check_for_duplicates, Episode, \
+    get_youtube_videos_from_playlists, format_time
 
 LOGGER = logging.getLogger("MaloneyDownloader")
 LOGGER.level = logging.DEBUG
 
 
-def download_old_episodes_from_spotify_and_yt():
-    if not check_for_tokens():
-        exit(1)
+def download_old_episodes_from_youtube():
+    youtube_videos = get_youtube_videos_from_playlists()
+    episodes = extract_episodes_from_youtube_videos(youtube_videos)
 
-    sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials())
-    url = "https://open.spotify.com/playlist/6U9szH2PXofr4xcbkJuteK"  # this is the real playlist!
-    # url = "https://open.spotify.com/album/7iRfCugT5qF56Gq5eVur0U"  # use for testing (just 3 episodes)
-    item_type, item_id = parse_spotify_url(url)
-
-    songs = fetch_tracks(sp, item_type, url)
-    episodes = extract_episodes_from_raw_songs(raw_songs=songs)
-    LOGGER.info(f"Fetched {len(songs)} individual tracks that make up {len(episodes)} episodes")
+    LOGGER.info(f"Fetched {len(youtube_videos)} individual tracks that make up {len(episodes)} episodes")
 
     for index, episode in enumerate(episodes):
-        LOGGER.debug(f"Downloading episode {index + 1}/{len(episodes)}: {episode.title}")
+        LOGGER.debug(f"Downloading episode {index + 1}/{len(episodes)}: {episode.title} "
+                     f"({len(episode.download_urls)} parts) with a "
+                     f"duration of {format_time(episode.duration_in_seconds)}")
         if is_episode_already_downloaded(episode):
             LOGGER.debug(f"Skipping download of episode '{episode.title}' because it is already downloaded")
             continue
         download_episode_from_yt(episode)
 
 
-def get_drs3_episode_list() -> List[Drs3Episode]:
+def get_drs3_episode_list() -> List[Episode]:
     episodes = []
     url = "https://www.srf.ch/play/radio/show/93a35193-66b6-4426-b7c1-9658cc497124/latestEpisodes?maxDate=ALL"
     for i in range(50):
@@ -53,7 +45,7 @@ def get_drs3_episode_list() -> List[Drs3Episode]:
         for episode in current_page_episodes:
             title = episode["title"]
             download_url = episode["absoluteDetailUrl"]
-            episodes.append(Drs3Episode(title, download_url))
+            episodes.append(Episode(title=title, download_urls=[download_url]))
 
         next_page_url = json_data.get("nextPageUrl", "")
         if not next_page_url:
@@ -105,6 +97,6 @@ def download_new_radio_episodes() -> None:
 
 
 if __name__ == '__main__':
-    download_old_episodes_from_spotify_and_yt()
+    download_old_episodes_from_youtube()
     build_fingerprints_and_check_for_duplicates()
     download_new_radio_episodes()
