@@ -162,6 +162,7 @@ def download_episode_from_yt(episode: YouTubeEpisode):
     Downloads all (parts / "scenes") of the episodes, merges them (if necessary) and stores them in the data directory.
     Retries the download in case a connection error occurred.
     """
+
     def get_temp_file_name_for_episode_part(download_url_index: int) -> str:
         if len(episode.download_urls) == 1:
             return episode.title
@@ -192,9 +193,11 @@ def download_episode_from_yt(episode: YouTubeEpisode):
             for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
                 try:
                     ydl.download([download_url])
-                    # perform a sanity check, just in case - sometimes the DL fails silently for no good reason, no idea why
-                    assert episode.temp_path.is_file(), f"Download of index {index} for episode '{episode.title}' " \
-                                                        f"failed: MP3 file is missing!"
+                    # perform a sanity check, just in case - sometimes the DL fails silently for
+                    # no good reason, no idea why
+                    temp_path = DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"
+                    assert temp_path.is_file(), f"Download of index {index} for episode '{episode.title}' " \
+                                                f"failed: MP3 file is missing!"
                     song_download_successful = True
                     break
                 except Exception as e:
@@ -214,7 +217,8 @@ def download_episode_from_yt(episode: YouTubeEpisode):
     if len(episode.download_urls) > 1:
         segments = []
         for index, download_url in enumerate(episode.download_urls):
-            segment = AudioSegment.from_mp3(str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"))
+            segment = AudioSegment.from_mp3(
+                str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"))
             segments.append(segment)
         final_audio_file = segments[0]
         for segment in segments[1:]:
