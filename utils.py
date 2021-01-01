@@ -361,7 +361,7 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     most_common_episode = counter.most_common(1)[0]
     most_common_episode_name, most_common_episode_count = most_common_episode
 
-    found_clear_winner = (most_common_episode_count / sample_count) > 0.6
+    found_clear_winner = (most_common_episode_count / sample_count) > 0.5
 
     if found_clear_winner:
         return_val = None if most_common_episode_name == "NO_MATCH" else most_common_episode_name
