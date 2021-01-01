@@ -226,6 +226,12 @@ def download_episode_from_yt(episode: YouTubeEpisode):
         final_audio_file.export(episode.final_path, format="mp3",
                                 tags={"title": episode.title, "artist": "Philip Maloney"})
 
+        # Sanity check
+        duration_difference = abs(final_audio_file.duration_seconds - episode.duration_in_seconds)
+        if duration_difference > 15:
+            LOGGER.warning(f"Final audio file has a duration difference of {format_time(duration_difference)}, "
+                           f"something is wrong!")
+
         # delete scenes
         for index in range(len(episode.download_urls)):
             os.remove(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3")
