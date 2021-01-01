@@ -90,7 +90,7 @@ def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
     helper_logger.level = logging.DEBUG
     helper_logger.propagate = False
 
-    for playlist_id in YOUTUBE_PLAYLIST_IDS:
+    for title, playlist_id in YOUTUBE_PLAYLIST_IDS:
         handler = YouTubeDlHandler()
         helper_logger.handlers = [handler]
 
