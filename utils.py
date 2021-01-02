@@ -295,7 +295,7 @@ def register_duplicate(duplicate_name: str, episode_name: str) -> None:
 def build_fingerprints_and_check_for_duplicates():
     LOGGER.info("Checking for duplicates, this may take an hour or longer")
     for episode_file in DATA_DIR_PATH.glob("*.mp3"):
-        episode = Episode(title=episode_file.name.rstrip(".mp3"), download_urls=[])
+        episode = Episode(title=episode_file.name[:-4], download_urls=[])  # get rid of MP3 extension
         potentially_existing_episode_name = is_episode_already_known_as_duplicate(episode)
         if not potentially_existing_episode_name:
             add_to_fingerprint_db(episode)
@@ -317,6 +317,8 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
         return episode.title
 
     episode_path = episode.temp_path if episode.temp_path.is_file() else episode.final_path
+    if not episode_path.is_file():
+        LOGGER.warning(f"File path {episode_path} does not exist")
     complete_segment = AudioSegment.from_mp3(episode_path)
     # After 30 seconds the introduction music has finished
     QUERY_CLIP_LENGTH_MS = 60000
