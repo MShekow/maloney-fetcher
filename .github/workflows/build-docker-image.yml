@@ -3,7 +3,7 @@ name: Build docker image
 on:
   push:
     branches:
-      - 'master'
+      - 'main'
   schedule:
     # * is a special character in YAML so you have to quote this string
     # Run this once per day
