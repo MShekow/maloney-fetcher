@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.request import urlretrieve
 
-import youtube_dl
+import eyed3
+import yt_dlp
 from pydub import AudioSegment
 
 from youtube_playlists import YOUTUBE_PLAYLIST_IDS
@@ -63,6 +65,15 @@ class YouTubeVideo:
     video_id: str
 
 
+def fix_mp3_tags(episode_title: str, file_path: str):
+    audiofile = eyed3.load(file_path)
+    if audiofile.tag is None:
+        audiofile.initTag()
+    audiofile.tag.artist = "Philip Maloney"
+    audiofile.tag.title = episode_title
+    audiofile.tag.save()
+
+
 def format_time(seconds: int) -> str:
     def get_formatted_int(val: int):
         return "%02d" % (val,)
@@ -101,7 +112,7 @@ def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
             'logger': helper_logger,
         }
 
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
                 try:
                     ydl.download([query])
@@ -173,23 +184,22 @@ def download_episode_from_yt(episode: YouTubeEpisode):
         # Building the ydl_opts dict was taken from the spotify-dl code, see spotify_dl/youtube.py file
         outtmpl = str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.%(ext)s")
         ydl_opts = {
-            'format': "bestaudio/best",
+            'format': "bestaudio",
             'outtmpl': outtmpl,
             'default_search': 'ytsearch',
             'noplaylist': True,
-            'quiet': True,
-            'postprocessor_args': ['-metadata', 'title=' + episode.title,
-                                   '-metadata', 'artist=Philip Maloney']
+            'quiet': True
         }
         mp3_postprocess_opts = {
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }
+        # YDL might download the clip as some kind of video (e.g. webm), from which we need the audio as MP3
         ydl_opts['postprocessors'] = [mp3_postprocess_opts.copy()]
 
         song_download_successful = False
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
                 try:
                     ydl.download([download_url])
@@ -213,8 +223,8 @@ def download_episode_from_yt(episode: YouTubeEpisode):
         LOGGER.warning("Aborting the merging of the part files, because at least one part could not be downloaded")
         return
 
-    # merge scene files if necessary and move to final location
     if len(episode.download_urls) > 1:
+        # merge scene files if necessary and move to final location
         segments = []
         for index, download_url in enumerate(episode.download_urls):
             segment = AudioSegment.from_mp3(
@@ -236,35 +246,21 @@ def download_episode_from_yt(episode: YouTubeEpisode):
         for index in range(len(episode.download_urls)):
             os.remove(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3")
     else:
+        # Update only the ID3 tag
+        fix_mp3_tags(episode.title, str(episode.temp_path))
         episode.move_from_temp_to_final()
 
 
 def download_episode_from_drs3(episode: Episode) -> bool:
-    ydl_opts = {
-        'outtmpl': str(episode.temp_path),
-        'quiet': True,
-        'postprocessor_args': ['-metadata', 'title=' + episode.title,
-                               '-metadata', 'artist=Philip Maloney']
-    }
+    try:
+        urlretrieve(episode.download_urls[0], episode.temp_path)  # performs a streaming download
+    except Exception as e:
+        LOGGER.warning(f"Unable to download episode {episode.title} from {episode.download_urls[0]}: {e}")
+        return False
 
-    download_successful = False
-    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-        for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
-            try:
-                ydl.download([episode.download_urls[0]])
-                download_successful = True
-                break
-            except Exception as e:
-                LOGGER.warning(f"DRS3-download attempt #{attempt} of episode '{episode.title}' failed: {e}")
-                if attempt == MAX_Y_DL_RETRIALS:
-                    LOGGER.warning("Giving up!")
+    fix_mp3_tags(episode.title, str(episode.temp_path))
 
-    if download_successful:
-        assert episode.temp_path.is_file(), f"Episode '{episode.title}' was downloaded with Y-DL from DRS3, but " \
-                                            f"the file is missing!"
-        return True
-
-    return False
+    return True
 
 
 def is_episode_already_downloaded(episode: Episode) -> bool:
