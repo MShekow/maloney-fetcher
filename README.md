@@ -17,9 +17,11 @@ being aired weekly, which means that there are `30 * 52 = 1560` broadcasts, with
 
 ## Dependencies
 - [Olaf](https://github.com/JorenSix/Olaf) for audio fingerprinting (detecting episode duplicates)
-- [YouTube-dl](https://github.com/ytdl-org/youtube-dl) to download the actual episodes from YouTube (or DRS3), using the meta-data scraped from YouTube or the DRS3 website
-- [requests](https://github.com/psf/requests/) to scrape DRS3's convenient API for episode meta-data
+- [YT-DLP](https://github.com/yt-dlp) to download the actual episodes from YouTube (or DRS3), using the meta-data scraped from YouTube or the DRS3 website
+- [requests](https://github.com/psf/requests/), [Beautiful Soup](https://www.crummy.com/software/BeautifulSoup/bs4/doc/),
+  and [python-dateutil](https://pypi.org/project/python-dateutil/) to scrape DRS3's website and API for episode meta-data
 - [pydub](https://github.com/jiaaro/pydub) to merge episode mp3 files which are split into multiple scenes (CD tracks) on YouTube
+- [eyeD3](https://eyed3.readthedocs.io/en/latest/) to update ID3 tags of MP3 files (without re-encoding them)
 
 
 ## Usage
