@@ -8,15 +8,15 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 import re
 
-QUALIFIED_CLASS = ['yt-simple-endpoint', 'style-scope', 'ytd-playlist-thumbnail']
+QUALIFIED_CLASS = ['yt-simple-endpoint', 'style-scope', 'ytd-grid-playlist-renderer']
 
 if __name__ == '__main__':
     playlist_ids = []
     html_file = Path(__file__).parent / "playlists-on-youtube.html"
     html_markup = html_file.read_text(encoding="utf-8")
     parsed = BeautifulSoup(html_markup, 'html.parser')
-    for a_tag in parsed.find_all('a'):
-        if a_tag["class"] == QUALIFIED_CLASS and "list=" in a_tag["href"]:
+    for a_tag in parsed.find_all('a', id="video-title"):
+        if "list=" in a_tag["href"]:
             href: str = a_tag["href"]  # example: '/watch?v=rJHbVUIqMbw&list=OLAK5uy_lLV6d8kFaKyo9tlY8G1MNROJkuuDTYgyw'
             playlist_id = href.split('=')[-1]
             title: str = a_tag.parent.parent.h3.a.string
