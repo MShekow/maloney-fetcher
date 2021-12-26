@@ -188,7 +188,8 @@ def download_episode_from_yt(episode: YouTubeEpisode):
             'outtmpl': outtmpl,
             'default_search': 'ytsearch',
             'noplaylist': True,
-            'quiet': True
+            'quiet': True,
+            'noprogress': True
         }
         mp3_postprocess_opts = {
             'key': 'FFmpegExtractAudio',
@@ -315,6 +316,8 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     episode_path = episode.temp_path if episode.temp_path.is_file() else episode.final_path
     if not episode_path.is_file():
         LOGGER.warning(f"File path {episode_path} does not exist")
+        return ""
+
     complete_segment = AudioSegment.from_mp3(episode_path)
     # After 30 seconds the introduction music has finished
     QUERY_CLIP_LENGTH_MS = 60000
