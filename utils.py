@@ -2,16 +2,23 @@ import json
 import logging
 import os
 import subprocess
+from abc import abstractmethod
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlparse, parse_qs
 from urllib.request import urlretrieve
 
 import eyed3
+import requests
 import yt_dlp
+from bs4 import BeautifulSoup
+from dateutil.parser import parse as parse_date
+from dateutil.utils import today
 from pydub import AudioSegment
 
 from youtube_playlists import YOUTUBE_PLAYLIST_IDS
@@ -25,6 +32,12 @@ TWELVE_MINUTES = 12 * 60
 THIRTY_FIVE_MINUTES = 35 * 60
 
 LOGGER = logging.getLogger("MaloneyDownloader")
+LOGGER.level = logging.DEBUG
+
+
+class SearchMode(Enum):
+    CacheOnly = 1
+    Fingerprinting = 2
 
 
 class YouTubeDlHandler(logging.Handler):
@@ -40,6 +53,12 @@ class YouTubeDlHandler(logging.Handler):
 class Episode:
     title: str
     download_urls: List[str]
+
+    @abstractmethod
+    def download_to_temp_file(self) -> bool:
+        """
+        Downloads the episode to the temp_path, and returns True if the download was successful, False otherwise.
+        """
 
     @property
     def final_path(self) -> Path:
@@ -57,9 +76,117 @@ class Episode:
 class YouTubeEpisode(Episode):
     duration_in_seconds: int
 
+    def download_to_temp_file(self) -> bool:
+        """
+        Downloads all (parts / "scenes") of the episodes, merges them (if necessary) and stores them in the temporary
+        directory. Retries the download in case a connection error occurred.
+        """
+
+        def get_temp_file_name_for_episode_part(download_url_index: int) -> str:
+            if len(self.download_urls) == 1:
+                return self.title
+            return f"{self.title}_{download_url_index}"
+
+        episode_download_successful = True
+        for index, download_url in enumerate(self.download_urls):
+            # Building the ydl_opts dict was taken from the spotify-dl code, see spotify_dl/youtube.py file
+            outtmpl = str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.%(ext)s")
+            ydl_opts = {
+                'format': "bestaudio",
+                'outtmpl': outtmpl,
+                'default_search': 'ytsearch',
+                'noplaylist': True,
+                'quiet': True,
+                'noprogress': True
+            }
+            mp3_postprocess_opts = {
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }
+            # YDL might download the clip as some kind of video (e.g. webm), from which we need the audio as MP3
+            ydl_opts['postprocessors'] = [mp3_postprocess_opts.copy()]
+
+            scene_download_successful = False
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
+                    try:
+                        ydl.download([download_url])
+                        # perform a sanity check, just in case - sometimes the DL fails silently for
+                        # no good reason, no idea why
+                        temp_path = DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"
+                        assert temp_path.is_file(), f"Download of index {index} for episode '{self.title}' " \
+                                                    f"failed: MP3 file is missing!"
+                        scene_download_successful = True
+                        break
+                    except Exception as e:
+                        LOGGER.warning(f"YouTube download attempt #{attempt} for episode '{self.title}' and "
+                                       f"download URL '{download_url}' (index {index}) failed: {e}")
+                        if attempt == MAX_Y_DL_RETRIALS:
+                            LOGGER.warning("Giving up!")
+                            continue
+            if not scene_download_successful:
+                episode_download_successful = False
+
+        if not episode_download_successful:
+            LOGGER.warning("Aborting the merging of the part files, because at least one part could not be downloaded")
+            return False
+
+        if len(self.download_urls) > 1:
+            # merge scene files if necessary and move to temporary location
+            segments = []
+            for index, download_url in enumerate(self.download_urls):
+                segment = AudioSegment.from_mp3(
+                    str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"))
+                segments.append(segment)
+            merged_audio_file = segments[0]
+            for segment in segments[1:]:
+                merged_audio_file += segment
+            merged_audio_file.export(self.temp_path, format="mp3",
+                                    tags={"title": self.title, "artist": "Philip Maloney"})
+
+            # Sanity check
+            duration_difference = abs(merged_audio_file.duration_seconds - self.duration_in_seconds)
+            if duration_difference > 15:
+                LOGGER.warning(f"Merged audio file has a duration difference of {format_time(duration_difference)}, "
+                               f"something is wrong!")
+
+            # delete scenes
+            for index in range(len(self.download_urls)):
+                os.remove(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3")
+        else:
+            # Update only the ID3 tag
+            fix_mp3_tags(self.title, str(self.temp_path))
+
+        return True
+
+    def __str__(self):
+        return f"YouTube episode '{self.title}'"
+
+
+@dataclass
+class Drs3Episode(Episode):
+    def download_to_temp_file(self) -> bool:
+        try:
+            urlretrieve(self.download_urls[0], self.temp_path)  # performs a streaming download
+        except Exception as e:
+            LOGGER.warning(f"Unable to download episode {self.title} from {self.download_urls[0]}: {e}")
+            return False
+
+        fix_mp3_tags(self.title, str(self.temp_path))
+
+        return True
+
+    def __str__(self):
+        return f"DRS3 episode '{self.title}'"
+
 
 @dataclass
 class YouTubeVideo:
+    """
+    Represents an individual YouTube video (might be just an individual scene of a Maloney episode, or an entire
+    episode).
+    """
     title: str
     duration_in_seconds: int
     video_id: str
@@ -94,7 +221,6 @@ def format_time(seconds: int) -> str:
 
 
 def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
-    LOGGER.info("Retrieving episode list of YouTube - this will take approx. 5 minutes")
     videos = []
 
     helper_logger = logging.getLogger("YouTube-DL Helper Logger")
@@ -137,6 +263,9 @@ def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
 
 
 def extract_episodes_from_youtube_videos(videos: List[YouTubeVideo]) -> List[YouTubeEpisode]:
+    def has_implausible_length(episode: YouTubeEpisode) -> bool:
+        return episode.duration_in_seconds < TWELVE_MINUTES or episode.duration_in_seconds > THIRTY_FIVE_MINUTES
+
     episodes: List[YouTubeEpisode] = []
     current_episode_title = ""
     current_episode: Optional[YouTubeEpisode] = None
@@ -161,114 +290,25 @@ def extract_episodes_from_youtube_videos(videos: List[YouTubeVideo]) -> List[You
 
     # Perform a sanity check on episode length
     for episode in episodes:
-        if episode.duration_in_seconds < TWELVE_MINUTES or episode.duration_in_seconds > THIRTY_FIVE_MINUTES:
-            LOGGER.warning(f"Episode '{episode.title}' has an unplausible duration "
+        if has_implausible_length(episode):
+            LOGGER.warning(f"Episode '{episode.title}' has an implausible duration "
                            f"of {format_time(episode.duration_in_seconds)}")
+
+    # Actually exclude those that have implausible lengths
+    episodes = [e for e in episodes if not has_implausible_length(e)]
 
     return episodes
 
 
-def download_episode_from_yt(episode: YouTubeEpisode):
-    """
-    Downloads all (parts / "scenes") of the episodes, merges them (if necessary) and stores them in the data directory.
-    Retries the download in case a connection error occurred.
-    """
-
-    def get_temp_file_name_for_episode_part(download_url_index: int) -> str:
-        if len(episode.download_urls) == 1:
-            return episode.title
-        return f"{episode.title}_{download_url_index}"
-
-    episode_download_successful = True
-    for index, download_url in enumerate(episode.download_urls):
-        # Building the ydl_opts dict was taken from the spotify-dl code, see spotify_dl/youtube.py file
-        outtmpl = str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.%(ext)s")
-        ydl_opts = {
-            'format': "bestaudio",
-            'outtmpl': outtmpl,
-            'default_search': 'ytsearch',
-            'noplaylist': True,
-            'quiet': True,
-            'noprogress': True
-        }
-        mp3_postprocess_opts = {
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }
-        # YDL might download the clip as some kind of video (e.g. webm), from which we need the audio as MP3
-        ydl_opts['postprocessors'] = [mp3_postprocess_opts.copy()]
-
-        song_download_successful = False
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
-                try:
-                    ydl.download([download_url])
-                    # perform a sanity check, just in case - sometimes the DL fails silently for
-                    # no good reason, no idea why
-                    temp_path = DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"
-                    assert temp_path.is_file(), f"Download of index {index} for episode '{episode.title}' " \
-                                                f"failed: MP3 file is missing!"
-                    song_download_successful = True
-                    break
-                except Exception as e:
-                    LOGGER.warning(f"YouTube download attempt #{attempt} for episode '{episode.title}' and "
-                                   f"download URL '{download_url}' (index {index}) failed: {e}")
-                    if attempt == MAX_Y_DL_RETRIALS:
-                        LOGGER.warning("Giving up!")
-                        continue
-        if not song_download_successful:
-            episode_download_successful = False
-
-    if not episode_download_successful:
-        LOGGER.warning("Aborting the merging of the part files, because at least one part could not be downloaded")
-        return
-
-    if len(episode.download_urls) > 1:
-        # merge scene files if necessary and move to final location
-        segments = []
-        for index, download_url in enumerate(episode.download_urls):
-            segment = AudioSegment.from_mp3(
-                str(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3"))
-            segments.append(segment)
-        final_audio_file = segments[0]
-        for segment in segments[1:]:
-            final_audio_file += segment
-        final_audio_file.export(episode.final_path, format="mp3",
-                                tags={"title": episode.title, "artist": "Philip Maloney"})
-
-        # Sanity check
-        duration_difference = abs(final_audio_file.duration_seconds - episode.duration_in_seconds)
-        if duration_difference > 15:
-            LOGGER.warning(f"Final audio file has a duration difference of {format_time(duration_difference)}, "
-                           f"something is wrong!")
-
-        # delete scenes
-        for index in range(len(episode.download_urls)):
-            os.remove(DATA_DIR_TEMP_PATH / f"{get_temp_file_name_for_episode_part(index)}.mp3")
-    else:
-        # Update only the ID3 tag
-        fix_mp3_tags(episode.title, str(episode.temp_path))
-        episode.move_from_temp_to_final()
-
-
-def download_episode_from_drs3(episode: Episode) -> bool:
-    try:
-        urlretrieve(episode.download_urls[0], episode.temp_path)  # performs a streaming download
-    except Exception as e:
-        LOGGER.warning(f"Unable to download episode {episode.title} from {episode.download_urls[0]}: {e}")
-        return False
-
-    fix_mp3_tags(episode.title, str(episode.temp_path))
-
-    return True
-
-
 def is_episode_already_downloaded(episode: Episode) -> bool:
-    return episode.final_path.is_file()
+    return episode.final_path.is_file() and episode.final_path.stat().st_size > 8* 1024 * 1024
 
 
 def is_episode_known_as_duplicate(episode: Episode) -> Optional[str]:
+    """
+    Checks whether the duplication DB already knows the provided episode's title, returning the "real" name.
+    Returns None otherwise.
+    """
     if not DUPLICATE_LIST_FILE.is_file():
         return None
 
@@ -277,6 +317,7 @@ def is_episode_known_as_duplicate(episode: Episode) -> Optional[str]:
 
 
 def register_duplicate(duplicate_name: str, episode_name: str) -> None:
+    """ Adds the duplicate to the duplication DB. """
     duplicates: Dict[str, str]
     if not DUPLICATE_LIST_FILE.is_file():
         duplicates = {}
@@ -289,38 +330,36 @@ def register_duplicate(duplicate_name: str, episode_name: str) -> None:
         json.dump(duplicates, f)
 
 
-def build_fingerprints_and_check_for_duplicates():
-    LOGGER.info("Checking for duplicates, this may take an hour or longer")
-    for episode_file in DATA_DIR_PATH.glob("*.mp3"):
-        episode = Episode(title=episode_file.name[:-4], download_urls=[])  # get rid of MP3 extension
-        potentially_existing_episode_name = is_episode_already_known_as_duplicate(episode)
-        if not potentially_existing_episode_name:
-            add_to_fingerprint_db(episode)
-        elif potentially_existing_episode_name != episode.title:
-            register_duplicate(duplicate_name=episode.title, episode_name=potentially_existing_episode_name)
-            LOGGER.warning(f"YouTube-downloaded episode '{episode.title}' already exist under different "
-                           f"name '{potentially_existing_episode_name}'")
-
-
 def is_episode_already_fingerprinted(episode: Episode) -> bool:
+    """ Returns True if the episode's absolute path is already known to the fingerprinting DB, False otherwise. """
     with suppress(OSError):
         with open("/root/.olaf/file_list.json", "r") as f:
             scanned_files: Dict[int, str] = json.load(f)  # maps from internal ID to absolute path
             return str(episode.final_path) in scanned_files.values()
 
 
-def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
-    if is_episode_already_fingerprinted(episode):
-        return episode.title
+def check_is_episode_known(episode: Episode, search_mode: SearchMode) -> Optional[str]:
+    """
+    Checks whether the episode is already known / downloaded. If so, the name of the episode is returned, which might
+    be different from `episode.title` in case fingerprinting revealed that the provided episode is a duplicate.
 
+    If search_mode is SearchMode.CacheOnly, then only locally-cached information is considered, e.g. the presence of
+    a file name, or the duplication DB.
+    """
+    if search_mode is SearchMode.CacheOnly:
+        if is_episode_already_downloaded(episode) or is_episode_already_fingerprinted(episode):
+            return episode.title
+        return is_episode_known_as_duplicate(episode)
+
+    # SearchMode is Fingerprinting
     episode_path = episode.temp_path if episode.temp_path.is_file() else episode.final_path
     if not episode_path.is_file():
         LOGGER.warning(f"File path {episode_path} does not exist")
-        return ""
+        return None
 
     complete_segment = AudioSegment.from_mp3(episode_path)
     # After 30 seconds the introduction music has finished
-    QUERY_CLIP_LENGTH_MS = 60000
+    QUERY_CLIP_LENGTH_MS = 90000
     THIRTY_SECS_MS = 30000
     query_segment = complete_segment[THIRTY_SECS_MS:THIRTY_SECS_MS + QUERY_CLIP_LENGTH_MS]
     query_clip_path = DATA_DIR_TEMP_PATH / "query_clip.mp3"
@@ -337,10 +376,10 @@ def is_episode_already_known_as_duplicate(episode: Episode) -> Optional[str]:
     1, 1, extract.mp3, Auf der Flucht.mp3, 4147541459, 63, -199.68, 199.90, 208.32, 8.64
     1, 1, extract.mp3, NO_MATCH, 0, 0, 0.00, 0.00, 0.00, 0.00
     <many more lines similar to the above ones>
-    
+
     We do not need the first line, as it contains no meaningful data.
     We only care about the "match name" column (3rd column, 0-indexed)
-    
+
     The general idea of identifying a duplicate is that we determine the majority of identified matches and return it.
     """
 
@@ -382,3 +421,57 @@ def add_to_fingerprint_db(episode: Episode):
     output_text = output.decode("utf-8")
     lines = output_text.splitlines()
     assert "times realtime" in lines[0], f"Unexpected output of Olaf store command: {output_text}"
+
+
+def get_drs3_episode_list() -> List[Drs3Episode]:
+    episodes: List[Drs3Episode] = []
+    LIMIT = 20
+    episode_list_url_template = f"https://www.srf.ch/audio/episodes/10000183/{LIMIT}/{{offset}}"
+    current_offset = 0
+    while True:
+        url = episode_list_url_template.format(offset=current_offset)
+        response = requests.get(url).json()
+        parsed = BeautifulSoup(response["content"], 'html.parser')
+        episodes_found_on_page = []
+        for div in parsed.contents:
+            title = div.find("div", class_="media-caption__title").string.strip()
+            episode = Drs3Episode(title=title, download_urls=[])
+
+            # Grab the episode's details page, to determine it's low-level ID
+            relative_page_url = div.find("a", class_="medium__play-link").attrs["href"].lstrip('/')
+            absolute_page_url = "https://www.srf.ch/" + relative_page_url
+            episode_page_content = requests.get(absolute_page_url).content.decode("utf-8")
+            parsed_episode_content = BeautifulSoup(episode_page_content, 'html.parser')
+            """
+            Look for a div like this, from which we only need to extract the "?id" query parameter:
+            <div class="js-media"
+                data-app-audio
+                tabindex="0"
+                data-href="/play/radio/_/audio/_?id=95991277-dcb9-40df-8a35-e3fbeafdca75&urn=urn:srf:audio:95991277-dcb9-40df-8a35-e3fbeafdca75" ....
+            </div>
+            """
+            relative_data_url = parsed_episode_content.find("div", class_="js-media").attrs["data-href"].lstrip('/')
+            parsed_url = urlparse("https://www.srf.ch/" + relative_data_url)
+            episode_id = parse_qs(parsed_url.query)['id'][0]
+
+            # Retrieve the JSON episode details
+            episode_metadata_url_template = "https://il.srgssr.ch/integrationlayer/2.0/mediaComposition/byUrn/urn:srf:audio:{episode_id}.json?onlyChapters=true&vector=portalplay"
+            episode_metadata = requests.get(episode_metadata_url_template.format(episode_id=episode_id)).json()
+            valid_to_datetime_string = episode_metadata["chapterList"][0]["validTo"]
+            valid_to_date = parse_date(valid_to_datetime_string)
+            if today().replace(tzinfo=timezone.utc) > valid_to_date:
+                LOGGER.info(f"Aborting at episode {title} because its validity expired on {valid_to_date}")
+                break
+
+            download_url: str = episode_metadata["chapterList"][0]["resourceList"][0]["url"]
+            episode.download_urls = [download_url]
+            episodes_found_on_page.append(episode)
+
+        if not episodes_found_on_page:
+            break
+
+        episodes.extend(episodes_found_on_page)
+
+        current_offset += LIMIT
+
+    return episodes
