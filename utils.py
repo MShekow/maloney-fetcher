@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from abc import abstractmethod
 from collections import Counter
 from contextlib import suppress
@@ -220,6 +221,35 @@ def format_time(seconds: int) -> str:
         return "%d sec" % d.second
 
 
+class StdoutCapturer:
+    """
+    Helper class that captures calls to sys.stdout.write(), which is used under the hood by yt_dlp (when dumping the
+    JSON containing the individual episodes of a YouTube playlist).
+    """
+
+    def __init__(self):
+        self.last_written_line = ""
+        self._stdout_original = sys.stdout
+
+    def write(self, written_string: str):
+        if not isinstance(written_string, str):
+            raise RuntimeError(f"Expected a string to be written, but got {written_string!r}")
+        self.last_written_line = written_string
+
+    def flush(self):
+        """
+        Dummy method that does nothing
+        """
+
+    def __enter__(self):
+        sys.stdout = self
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout = self._stdout_original
+        # Note: by returning nothing, any exceptions that occurred will be automatically re-raised by the Python runtime
+
+
 def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
     videos = []
 
@@ -238,26 +268,26 @@ def get_youtube_videos_from_playlists() -> List[YouTubeVideo]:
             'logger': helper_logger,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
-                try:
-                    ydl.download([query])
-                    ydl_log_output = handler.messages
-                    # Expect that the last line contains the single JSON dump that contains all information
-                    last_output_line = ydl_log_output[-1]
-                    assert last_output_line.startswith('{'), f"Last output line of Y-DL should be JSON, " \
-                                                             f"but is {ydl_log_output[-1]}"
-                    json_data = json.loads(last_output_line)
-                    entry: dict
-                    for entry in json_data["entries"]:
-                        videos.append(YouTubeVideo(title=entry["title"], duration_in_seconds=int(entry["duration"]),
-                                                   video_id=entry["id"]))
-                    break
-                except Exception as e:
-                    LOGGER.warning(f"Attempt #{attempt} failed to get videos in playlist: {e}")
-                    if attempt == MAX_Y_DL_RETRIALS:
-                        LOGGER.warning("Giving up!")
-                        continue
+        with StdoutCapturer() as capturer:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                for attempt in range(1, 1 + MAX_Y_DL_RETRIALS):
+                    try:
+                        ydl.download([query])
+                        # Expect that the last line contains the single JSON dump that contains all information
+                        json_line_dump = capturer.last_written_line
+                        assert json_line_dump.startswith('{'), f"Last output line of Y-DL should be JSON, " \
+                                                               f"but is {json_line_dump[-1]}"
+                        json_data = json.loads(json_line_dump)
+                        entry: dict
+                        for entry in json_data["entries"]:
+                            videos.append(YouTubeVideo(title=entry["title"], duration_in_seconds=int(entry["duration"]),
+                                                       video_id=entry["id"]))
+                        break
+                    except Exception as e:
+                        LOGGER.warning(f"Attempt #{attempt} failed to get videos in playlist: {e}")
+                        if attempt == MAX_Y_DL_RETRIALS:
+                            LOGGER.warning("Giving up!")
+                            continue
 
     return videos
 
