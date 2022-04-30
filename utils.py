@@ -464,7 +464,7 @@ def get_drs3_episode_list() -> List[Drs3Episode]:
         parsed = BeautifulSoup(response["content"], 'html.parser')
         episodes_found_on_page = []
         for div in parsed.contents:
-            title = div.find("div", class_="media-caption__title").string.strip()
+            title = div.find("h4", class_="media-caption__title").string.strip()
             episode = Drs3Episode(title=title, download_urls=[])
 
             # Grab the episode's details page, to determine it's low-level ID
