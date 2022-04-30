@@ -144,7 +144,7 @@ class YouTubeEpisode(Episode):
             for segment in segments[1:]:
                 merged_audio_file += segment
             merged_audio_file.export(self.temp_path, format="mp3",
-                                    tags={"title": self.title, "artist": "Philip Maloney"})
+                                     tags={"title": self.title, "artist": "Philip Maloney"})
 
             # Sanity check
             duration_difference = abs(merged_audio_file.duration_seconds - self.duration_in_seconds)
@@ -331,7 +331,7 @@ def extract_episodes_from_youtube_videos(videos: List[YouTubeVideo]) -> List[You
 
 
 def is_episode_already_downloaded(episode: Episode) -> bool:
-    return episode.final_path.is_file() and episode.final_path.stat().st_size > 8* 1024 * 1024
+    return episode.final_path.is_file() and episode.final_path.stat().st_size > 8 * 1024 * 1024
 
 
 def is_episode_known_as_duplicate(episode: Episode) -> Optional[str]:
