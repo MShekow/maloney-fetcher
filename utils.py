@@ -300,12 +300,26 @@ def extract_episodes_from_youtube_videos(videos: List[YouTubeVideo]) -> List[You
     current_episode_title = ""
     current_episode: Optional[YouTubeEpisode] = None
 
+    # Multi-part episodes have naming schemes like "Episode Title: Szene X" or "Episode Title, Scene X", etc.
+
     for video in videos:
-        if ':' not in video.title:
-            # some episodes are not split into multiple tracks/scenes
-            episode_title = video.title
-        else:
-            episode_title, _scene_index = video.title.split(':')
+        split_options = [
+            video.title.split(': Szene '),
+            video.title.split(', Szene '),
+            video.title.split(': Scene '),
+            video.title.split(', Scene '),
+        ]
+
+        episode_title = ""
+        for split_option in split_options:
+            if len(split_option) == 2:
+                episode_title, _scene_index = split_option
+                break
+
+        if not episode_title:
+            LOGGER.warning(f"Unable to split title '{video.title}'")
+            continue
+
         if episode_title != current_episode_title:
             if current_episode:
                 episodes.append(current_episode)
