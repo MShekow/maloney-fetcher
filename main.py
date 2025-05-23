@@ -3,7 +3,7 @@ from typing import List
 
 from utils import extract_episodes_from_youtube_videos, register_duplicate, add_to_fingerprint_db, Episode, \
     get_youtube_videos_from_playlists, check_is_episode_known, SearchMode, get_drs3_episode_list, \
-    is_episode_already_fingerprinted
+    is_episode_already_fingerprinted, DATA_DIR_TEMP_PATH
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOGGER = logging.getLogger("MaloneyDownloader")
@@ -20,6 +20,8 @@ if __name__ == '__main__':
     drs3_episodes = get_drs3_episode_list()
 
     episodes: List[Episode] = youtube_episodes + drs3_episodes
+
+    DATA_DIR_TEMP_PATH.mkdir(parents=True, exist_ok=True)
 
     LOGGER.info(f"Fetched a total of {len(episodes)} episodes. Beginning download...")
 

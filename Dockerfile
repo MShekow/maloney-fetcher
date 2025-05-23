@@ -1,7 +1,7 @@
-FROM python:3.8
+FROM python:3.11
 
 RUN apt-get update && apt-get install -y sox libsox-fmt-mp3 ffmpeg ruby sudo
-RUN pip install yt-dlp pydub requests lxml bs4 python-dateutil eyeD3
+RUN pip install yt-dlp pydub requests lxml python-dateutil eyeD3
 
 RUN git clone https://github.com/JorenSix/Olaf.git \
     && cd Olaf \

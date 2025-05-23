@@ -11,13 +11,11 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import urlparse, parse_qs
 from urllib.request import urlretrieve
 
 import eyed3
 import requests
 import yt_dlp
-from bs4 import BeautifulSoup
 from dateutil.parser import parse as parse_date
 from dateutil.utils import today
 from pydub import AudioSegment
@@ -469,53 +467,49 @@ def add_to_fingerprint_db(episode: Episode):
 
 def get_drs3_episode_list() -> List[Drs3Episode]:
     episodes: List[Drs3Episode] = []
-    LIMIT = 20
-    episode_list_url_template = f"https://www.srf.ch/audio/episodes/10000183/{LIMIT}/{{offset}}"
-    current_offset = 0
-    while True:
-        url = episode_list_url_template.format(offset=current_offset)
-        response = requests.get(url).json()
-        parsed = BeautifulSoup(response["content"], 'html.parser')
-        episodes_found_on_page = []
-        for div in parsed.contents:
-            title = div.find("h4", class_="media-caption__title").string.strip()
-            episode = Drs3Episode(title=title, download_urls=[])
 
-            # Grab the episode's details page, to determine it's low-level ID
-            relative_page_url = div.find("a", class_="medium__play-link").attrs["href"].lstrip('/')
-            absolute_page_url = "https://www.srf.ch/" + relative_page_url
-            episode_page_content = requests.get(absolute_page_url).content.decode("utf-8")
-            parsed_episode_content = BeautifulSoup(episode_page_content, 'html.parser')
-            """
-            Look for a div like this, from which we only need to extract the "?id" query parameter:
-            <div class="js-media"
-                data-app-audio
-                tabindex="0"
-                data-href="/play/radio/_/audio/_?id=95991277-dcb9-40df-8a35-e3fbeafdca75&urn=urn:srf:audio:95991277-dcb9-40df-8a35-e3fbeafdca75" ....
-            </div>
-            """
-            relative_data_url = parsed_episode_content.find("div", class_="js-media").attrs["data-href"].lstrip('/')
-            parsed_url = urlparse("https://www.srf.ch/" + relative_data_url)
-            episode_id = parse_qs(parsed_url.query)['id'][0]
+    asset_url_template = "https://il.srf.ch/integrationlayer/2.0/mediaComposition/byUrn/urn:srf:audio:{asset_id}.json"
 
-            # Retrieve the JSON episode details
-            episode_metadata_url_template = "https://il.srgssr.ch/integrationlayer/2.0/mediaComposition/byUrn/urn:srf:audio:{episode_id}.json?onlyChapters=true&vector=portalplay"
-            episode_metadata = requests.get(episode_metadata_url_template.format(episode_id=episode_id)).json()
-            valid_to_datetime_string = episode_metadata["chapterList"][0]["validTo"]
+    for i in range(1, 100):
+        url = f"https://www.srf.ch/aron/api/audio/shows/A00361/latestEpisodes?page={i}"
+        episode_list: list[dict] = requests.get(url).json()
+        if not episode_list:
+            break
+
+        for episode in episode_list:
+            if "assetId" not in episode or "title" not in episode:
+                LOGGER.warning(f"Missing meta-data in DRS 3 episode list, 'title' or 'assetId' are missing: {episode}")
+                continue
+            asset_id = episode["assetId"]
+            title = episode["title"]
+            asset_url = asset_url_template.format(asset_id=asset_id)
+            asset: dict = requests.get(asset_url).json()
+            if "chapterList" not in asset:
+                LOGGER.warning(f"Missing 'chapterList' in DRS 3 episode list: {asset}")
+                continue
+
+            chapter = asset["chapterList"][0]
+            if "resourceList" not in chapter:
+                LOGGER.warning(f"Missing 'resourceList' in DRS 3 episode list: {chapter}")
+                continue
+
+            valid_to_datetime_string = chapter["validTo"]
             valid_to_date = parse_date(valid_to_datetime_string)
             if today().replace(tzinfo=timezone.utc) > valid_to_date:
                 LOGGER.info(f"Aborting at episode {title} because its validity expired on {valid_to_date}")
-                break
+                return episodes
 
-            download_url: str = episode_metadata["chapterList"][0]["resourceList"][0]["url"]
-            episode.download_urls = [download_url]
-            episodes_found_on_page.append(episode)
+            resource: dict = chapter["resourceList"][0]
+            if "url" not in resource:
+                LOGGER.warning(f"Missing 'url' in DRS 3 episode list: {resource}")
+                continue
 
-        if not episodes_found_on_page:
-            break
+            download_url = resource["url"]
+            if not download_url.endswith(".mp3"):
+                LOGGER.warning(f"Unexpected URL in DRS 3 episode list, does not end with '.mp3': {download_url}")
+                continue
 
-        episodes.extend(episodes_found_on_page)
-
-        current_offset += LIMIT
+            episode = Drs3Episode(title=title, download_urls=[download_url])
+            episodes.append(episode)
 
     return episodes
