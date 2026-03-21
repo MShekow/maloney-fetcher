@@ -489,15 +489,15 @@ def get_drs3_episode_list() -> List[Drs3Episode]:
                 continue
 
             chapter = asset["chapterList"][0]
-            if "resourceList" not in chapter:
-                LOGGER.warning(f"Missing 'resourceList' in DRS 3 episode list: {chapter}")
-                continue
-
             valid_to_datetime_string = chapter["validTo"]
             valid_to_date = parse_date(valid_to_datetime_string)
             if today().replace(tzinfo=timezone.utc) > valid_to_date:
                 LOGGER.info(f"Aborting at episode {title} because its validity expired on {valid_to_date}")
                 return episodes
+
+            if "resourceList" not in chapter:
+                LOGGER.warning(f"Missing 'resourceList' in DRS 3 episode list: {chapter}")
+                continue
 
             resource: dict = chapter["resourceList"][0]
             if "url" not in resource:
